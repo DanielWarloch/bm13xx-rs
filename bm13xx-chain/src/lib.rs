@@ -77,7 +77,10 @@ mod error;
 
 pub use self::error::{Error, Result};
 
-use bm13xx_asic::{register::ChipIdentification, Asic, CmdDelay};
+use bm13xx_asic::{
+    register::{AnalogMuxControlV2, ChipIdentification, CoreRegisterControl},
+    Asic, CmdDelay,
+};
 use bm13xx_protocol::{
     command::{Command, Destination},
     response::{Response, ResponseType, FRAME_SIZE, FRAME_SIZE_VER},
@@ -174,7 +177,7 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                 }
                 Err(bm13xx_protocol::Error::InvalidCrc { expected, actual }) => {
                     error!(
-                        "Ignoring Frame {:x} with bad CRC: {:02x}!={:02x}",
+                        "Ignoring Frame {:x?} with bad CRC: {:02x}!={:02x}",
                         frame, expected, actual
                     );
                     expected_frame_size
@@ -185,7 +188,7 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                         .position(|w| w == [0xAA, 0x55])
                         .unwrap_or(expected_frame_size);
                     error!(
-                        "Resync Frame {:x} because bad preamble, dropping first {} bytes",
+                        "Resync Frame {:?} because bad preamble, dropping first {} bytes",
                         frame, offset
                     );
                     offset
@@ -196,6 +199,11 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                 self.rx_buf.copy_within(used..self.rx_free_pos, 0);
             }
             self.rx_free_pos -= used;
+        }
+        // If we have a valid response, return it
+        // Without that we can get stuck in "self.uart.read()"
+        if resp.is_some() {
+            return Ok(resp);
         }
         if self.uart.read_ready().map_err(Error::Io)? {
             let n = self
@@ -224,8 +232,10 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
     /// - Protocol error
     /// - Unexpected asic count
     pub async fn enumerate(&mut self) -> Result<(), U::Error, OB::Error, OR::Error> {
-        self.reset.set_high().map_err(Error::Reset)?;
+        self.reset.set_low().map_err(Error::Reset)?;
         self.delay.delay_ms(10).await;
+        self.reset.set_high().map_err(Error::Reset)?;
+        self.delay.delay_ms(50).await;
         self.busy.set_low().map_err(Error::Busy)?;
         let cmd = Command::read_reg(ChipIdentification::ADDR, Destination::All);
         self.uart.write_all(&cmd).await.map_err(Error::Io)?;
@@ -270,11 +280,13 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
         }
         self.delay.delay_ms(50).await;
         if post_s19jpro {
+            info!("Post S19JPro");
             self.delay.delay_ms(100).await;
             while let Some(step) = self.asic.reset_core_next(Destination::All) {
                 self.send(step).await?;
             }
         }
+        info!("Set chip inactives");
         let cmd = Command::chain_inactive();
         self.uart.write_all(&cmd).await.map_err(Error::Io)?;
         if !post_s19jpro {
@@ -285,6 +297,7 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
         }
         self.delay.delay_ms(30).await;
         for i in 0..asic_cnt {
+            info!("Set chip addr {}", i);
             let cmd = Command::set_chip_addr((i as u16 * self.asic_addr_interval) as u8);
             self.uart.write_all(&cmd).await.map_err(Error::Io)?;
             self.delay.delay_ms(10).await;
@@ -343,6 +356,33 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                 self.send(step).await?;
             }
         }
+        self.delay.delay_ms(290).await;
+
+        self.send(CmdDelay {
+            cmd: Command::write_reg(0xB9, 0x0000_4480, Destination::All),
+            delay_ms: 20,
+        })
+        .await
+        .unwrap();
+        self.send(CmdDelay {
+            cmd: Command::write_reg(AnalogMuxControlV2::ADDR, 0x0000_0002, Destination::All),
+            delay_ms: 100,
+        })
+        .await
+        .unwrap();
+        self.send(CmdDelay {
+            cmd: Command::write_reg(0xB9, 0x0000_4480, Destination::All),
+            delay_ms: 20,
+        })
+        .await
+        .unwrap();
+        self.send(CmdDelay {
+            cmd: Command::write_reg(CoreRegisterControl::ADDR, 0x8000_8DEE, Destination::All),
+            delay_ms: 100,
+        })
+        .await
+        .unwrap();
+
         self.delay.delay_ms(100).await;
         Ok(())
     }

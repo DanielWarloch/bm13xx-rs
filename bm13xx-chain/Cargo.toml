@@ -30,6 +30,7 @@ defmt-03 = [
     "fugit/defmt",
     "heapless/defmt-03",
 ]
+log = [ "dep:log" ]
 
 [dev-dependencies]
 bm1366 = { path = "../bm1366" }
