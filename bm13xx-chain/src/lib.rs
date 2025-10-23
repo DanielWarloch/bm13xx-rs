@@ -265,6 +265,7 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
 
         let mut asic_cnt = 0;
         let mut post_s19jpro = false;
+        let mut try_cnt = 0;
         loop {
             chain.delay.delay_ms(10).await;
             if let Some(resp) = chain.poll_response().await? {
@@ -290,7 +291,10 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                     return Err(Error::UnexpectedResponse { resp });
                 };
             } else {
-                break;
+                try_cnt += 1;
+                if try_cnt >= 5 {
+                    break;
+                }
             }
         }
         if asic_cnt == 0 {
