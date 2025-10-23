@@ -275,12 +275,15 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                     }
                     let chip_ident = ChipIdentification(reg_resp.reg_value);
                     if chip_ident.core_num() == 0 {
+                        warn!("Detected core_num=0, assuming post S19j Pro ASIC");
                         post_s19jpro = true;
                     }
                     if chip_ident.chip_id() == chain.asic.chip_id() {
+                        info!("Found asic #{}: {:?}", asic_cnt, chip_ident);
                         asic_cnt += 1;
                     } else {
                         // Heterogeneous chain is forbidden
+                        info!("Unexpected asic #{}: {:?}", asic_cnt, chip_ident);
                         return Err(Error::UnexpectedAsic { chip_ident });
                     }
                 } else {
