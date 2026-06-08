@@ -26,6 +26,8 @@ pub enum Error<IO, B, R> {
     Reset(R),
     /// The serial interface returned an error while setting baudrate
     SetBaudrate,
+    /// No matching register response arrived before the read poll budget expired
+    ReadTimeout,
 }
 
 #[rustversion::since(1.81)]
@@ -66,6 +68,7 @@ impl<IO: core::fmt::Debug, B: core::fmt::Debug, R: core::fmt::Debug> core::fmt::
             Error::Busy(gpio_err) => f.debug_tuple("Busy").field(gpio_err).finish(),
             Error::Reset(gpio_err) => f.debug_tuple("Reset").field(gpio_err).finish(),
             Error::SetBaudrate => f.debug_struct("SetBaudrate").finish(),
+            Error::ReadTimeout => f.debug_struct("ReadTimeout").finish(),
         }
     }
 }

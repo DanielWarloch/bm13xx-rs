@@ -61,4 +61,18 @@ pub trait Asic {
         asic_addr_interval: usize,
     ) -> Option<CmdDelay>;
     fn set_version_rolling_next(&mut self, mask: u32) -> Option<CmdDelay>;
+
+    /// Compute the PLL register writes that set the hash frequency of a single chip
+    /// (addressed by `dest`), without disturbing the chain-nominal frequency state.
+    ///
+    /// Returns the `(divider, parameter)` write commands, or `None` for ASICs that do
+    /// not support per-chip frequency. The default is `None`; concrete ASICs override.
+    fn set_hash_freq_chip_cmd(
+        &self,
+        dest: Destination,
+        target_freq: HertzU64,
+    ) -> Option<(CmdDelay, CmdDelay)> {
+        let _ = (dest, target_freq);
+        None
+    }
 }

@@ -1061,6 +1061,50 @@ impl Asic for BM1370 {
         }
     }
 
+    /// ## Per-chip Hash Frequency command
+    ///
+    /// Compute the PLL0 (hashing) divider + parameter writes for `target_freq` on a
+    /// scratch copy of the hashing PLL — so the chain-nominal `hash_freq()` is left
+    /// untouched — then address them to a single chip via `dest`. The emitted bytes
+    /// are identical to the broadcast ramp's final step; only the `Destination` differs.
+    ///
+    /// ### Example
+    /// ```
+    /// use bm1370::BM1370;
+    /// use bm13xx_asic::Asic;
+    /// use bm13xx_protocol::command::Destination;
+    /// use fugit::HertzU64;
+    ///
+    /// let bm1370 = BM1370::default();
+    /// let (div, par) = bm1370
+    ///     .set_hash_freq_chip_cmd(Destination::Chip(2), HertzU64::MHz(525))
+    ///     .unwrap();
+    /// // divider write to PLL0Divider (0x70) on chip @2, parameter write to PLL0Parameter (0x08)
+    /// assert_eq!(div.cmd[2], 0x41); // CMD_WRITE_REGISTER (single chip)
+    /// assert_eq!(div.cmd[4], 2);    // chip address
+    /// assert_eq!(div.cmd[5], 0x70); // PLL0Divider::ADDR
+    /// assert_eq!(par.cmd[5], 0x08); // PLL0Parameter::ADDR
+    /// ```
+    fn set_hash_freq_chip_cmd(
+        &self,
+        dest: Destination,
+        target_freq: HertzU64,
+    ) -> Option<(CmdDelay, CmdDelay)> {
+        let mut pll = self.plls[BM1370_PLL_ID_HASH];
+        pll.set_out_div(BM1370_PLL_OUT_HASH, 0);
+        pll.set_frequency(self.input_clock_freq, BM1370_PLL_OUT_HASH, target_freq, false);
+        let divider = CmdDelay {
+            cmd: Command::write_reg(PLL0Divider::ADDR, pll.divider(), dest),
+            delay_ms: 2,
+        };
+        let parameter = CmdDelay {
+            // Conservative PLL relock settle delay, matching the broadcast ramp.
+            cmd: Command::write_reg(PLL0Parameter::ADDR, pll.parameter(), dest),
+            delay_ms: if target_freq > HertzU64::MHz(550) { 2700 } else { 400 },
+        };
+        Some((divider, parameter))
+    }
+
     /// ## Send Split Nonce Between Chips command list
     ///
     /// ### Example

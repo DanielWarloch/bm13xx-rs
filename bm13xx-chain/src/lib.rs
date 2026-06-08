@@ -73,7 +73,10 @@ use core::time::Duration;
 
 pub use self::error::{Error, Result};
 
-use bm13xx_asic::{register::ChipIdentification, Asic, CmdDelay};
+use bm13xx_asic::{
+    register::{ChipIdentification, Register, TicketMask},
+    Asic, CmdDelay,
+};
 use bm13xx_protocol::{
     command::{Command, Destination},
     response::{Response, ResponseType, FRAME_SIZE, FRAME_SIZE_VER},
@@ -407,6 +410,79 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
         }
         self.delay.delay_ms(100).await;
         Ok(())
+    }
+
+    /// ## Set the Ticket Mask (share difficulty) on the whole chain
+    ///
+    /// Writes the `TicketMask` register derived from `difficulty` to every chip, so the
+    /// chain only returns nonces at or above that difficulty. This is the standalone
+    /// form of what [`Chain::init`] applies once during initialization, letting the
+    /// pool's difficulty be re-applied at runtime without a full re-init.
+    pub async fn set_ticket_mask(
+        &mut self,
+        difficulty: u32,
+    ) -> Result<(), U::Error, OB::Error, OR::Error> {
+        // `from_difficulty(0)` underflows (`31 - 0u32.leading_zeros()`), so clamp to ≥1
+        // (difficulty 1 = an all-zero mask = accept every nonce).
+        let mask = TicketMask::from_difficulty(difficulty.max(1)).val();
+        self.send(CmdDelay {
+            cmd: Command::write_reg(TicketMask::ADDR, mask, Destination::All),
+            delay_ms: 10,
+        })
+        .await?;
+        self.delay.delay_ms(50).await;
+        Ok(())
+    }
+
+    /// ## Set the Hash Frequency of a single chip
+    ///
+    /// Sets one chip's hashing PLL to `freq`, leaving the rest of the chain unchanged —
+    /// useful for per-chip thermal/yield balancing. Does nothing (returns `Ok`) on
+    /// ASICs that do not support per-chip frequency. The chip is addressed by its
+    /// logical `chip_addr` (i.e. `asic_index * asic_addr_interval`).
+    pub async fn set_hash_freq_chip(
+        &mut self,
+        chip_addr: u8,
+        freq: HertzU64,
+    ) -> Result<(), U::Error, OB::Error, OR::Error> {
+        if let Some((divider, parameter)) = self
+            .asic
+            .set_hash_freq_chip_cmd(Destination::Chip(chip_addr), freq)
+        {
+            self.send(divider).await?;
+            self.send(parameter).await?;
+        }
+        Ok(())
+    }
+
+    /// ## Read a register from the chain
+    ///
+    /// Sends a Read Register command (to all chips or one, per `dest`) and waits for the
+    /// matching response frame, returning its 32-bit value. A bounded poll keeps this
+    /// from blocking forever if no chip answers (e.g. a wrong address) — it returns
+    /// [`Error::ReadTimeout`] after the budget. With [`Destination::All`] on a
+    /// multi-chip chain, the first chip to answer wins. Non-matching frames (e.g.
+    /// interleaved nonces) are skipped.
+    pub async fn read_register(
+        &mut self,
+        reg_addr: u8,
+        dest: Destination,
+    ) -> Result<u32, U::Error, OB::Error, OR::Error> {
+        let cmd = Command::read_reg(reg_addr, dest);
+        self.uart.write_all(&cmd).await.map_err(Error::Io)?;
+        for _ in 0..100 {
+            if let Some(ResponseType::Reg(reg_resp)) = self.poll_response().await? {
+                let chip_ok = match dest {
+                    Destination::All => true,
+                    Destination::Chip(c) => reg_resp.chip_addr == c,
+                };
+                if chip_ok && reg_resp.reg_addr == reg_addr {
+                    return Ok(reg_resp.reg_value);
+                }
+            }
+            self.delay.delay_ms(2).await;
+        }
+        Err(Error::ReadTimeout)
     }
 
     /// ## Split some Nonce space between chips
