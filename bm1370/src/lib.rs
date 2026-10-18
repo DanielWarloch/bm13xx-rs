@@ -461,14 +461,15 @@ impl Asic for BM1370 {
                         // .val();
                         // S21XP
                         // let clk_dly_ctrl = 0x10;
-                        let clk_dly_ctrl = ClockDelayCtrlV2(
-                            *self.core_registers.get(&ClockDelayCtrlV2::ID).unwrap(),
-                        )
-                        .set_ccdly(0)
-                        .set_pwth(2)
-                        // .disable_bit2()
-                        .disable_sweep_frequency_mode()
-                        .val();
+                        // Built from 0 rather than the 0x52 reset value: stock S21XP writes
+                        // 0x10, i.e. with bit 1 of the reset value cleared too. Bit 1 used to
+                        // be cleared implicitly by the `set_ccdly` mask-precedence bug.
+                        let clk_dly_ctrl = ClockDelayCtrlV2(0x00)
+                            .set_ccdly(0)
+                            .set_pwth(2)
+                            // .disable_bit2()
+                            .disable_sweep_frequency_mode()
+                            .val();
                         self.core_registers
                             .insert(ClockDelayCtrlV2::ID, clk_dly_ctrl)
                             .unwrap();

@@ -39,7 +39,7 @@ impl ClockDelayCtrl {
         (self.0 >> Self::CCDLY_SEL_OFFSET) & Self::CCDLY_SEL_MASK
     }
     pub fn set_ccdly(&mut self, ccdly: u8) -> &mut Self {
-        self.0 &= !Self::CCDLY_SEL_MASK << Self::CCDLY_SEL_OFFSET;
+        self.0 &= !(Self::CCDLY_SEL_MASK << Self::CCDLY_SEL_OFFSET);
         self.0 |= (ccdly & Self::CCDLY_SEL_MASK) << Self::CCDLY_SEL_OFFSET;
         self
     }
@@ -62,7 +62,7 @@ impl ClockDelayCtrl {
         (self.0 >> Self::PWTH_SEL_OFFSET) & Self::PWTH_SEL_MASK
     }
     pub fn set_pwth(&mut self, pwth: u8) -> &mut Self {
-        self.0 &= !Self::PWTH_SEL_MASK << Self::PWTH_SEL_OFFSET;
+        self.0 &= !(Self::PWTH_SEL_MASK << Self::PWTH_SEL_OFFSET);
         self.0 |= (pwth & Self::PWTH_SEL_MASK) << Self::PWTH_SEL_OFFSET;
         self
     }
@@ -211,7 +211,7 @@ impl ClockDelayCtrlV2 {
         (self.0 >> Self::CCDLY_SEL_OFFSET) & Self::CCDLY_SEL_MASK
     }
     pub fn set_ccdly(&mut self, ccdly: u8) -> &mut Self {
-        self.0 &= !Self::CCDLY_SEL_MASK << Self::CCDLY_SEL_OFFSET;
+        self.0 &= !(Self::CCDLY_SEL_MASK << Self::CCDLY_SEL_OFFSET);
         self.0 |= (ccdly & Self::CCDLY_SEL_MASK) << Self::CCDLY_SEL_OFFSET;
         self
     }
@@ -235,7 +235,7 @@ impl ClockDelayCtrlV2 {
         (self.0 >> Self::PWTH_SEL_OFFSET) & Self::PWTH_SEL_MASK
     }
     pub fn set_pwth(&mut self, pwth: u8) -> &mut Self {
-        self.0 &= !Self::PWTH_SEL_MASK << Self::PWTH_SEL_OFFSET;
+        self.0 &= !(Self::PWTH_SEL_MASK << Self::PWTH_SEL_OFFSET);
         self.0 |= (pwth & Self::PWTH_SEL_MASK) << Self::PWTH_SEL_OFFSET;
         self
     }
@@ -290,5 +290,37 @@ impl defmt::Format for ClockDelayCtrlV2 {
             self.pwth(),
             self.sweep_frequency_mode_enabled(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_set_ccdly_preserves_other_fields() {
+        // pwth=3, hash_clken, mmen, swpf all set: 0b0011_1101
+        assert_eq!(ClockDelayCtrl(0x3D).set_ccdly(1).val(), 0x7D);
+        assert_eq!(ClockDelayCtrl(0xFF).set_ccdly(0).val(), 0x3F);
+    }
+
+    #[test]
+    fn v1_set_pwth_preserves_other_fields() {
+        assert_eq!(ClockDelayCtrl(0xCD).set_pwth(2).val(), 0xED);
+        assert_eq!(ClockDelayCtrl(0xFF).set_pwth(0).val(), 0xCF);
+    }
+
+    #[test]
+    fn v2_set_ccdly_preserves_other_fields() {
+        // pwth=0b111, bit2, bit1, swpf all set: 0b0011_1111
+        assert_eq!(ClockDelayCtrlV2(0x3F).set_ccdly(2).val(), 0xBF);
+        assert_eq!(ClockDelayCtrlV2(0xFF).set_ccdly(0).val(), 0x3F);
+    }
+
+    #[test]
+    fn v2_set_pwth_preserves_other_fields() {
+        // ccdly=3, bit2, bit1, swpf set: 0b1100_0111
+        assert_eq!(ClockDelayCtrlV2(0xC7).set_pwth(2).val(), 0xD7);
+        assert_eq!(ClockDelayCtrlV2(0xFF).set_pwth(0).val(), 0xC7);
     }
 }
