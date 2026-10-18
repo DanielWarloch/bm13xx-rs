@@ -20,6 +20,12 @@ pub const BM1370_PLL_ID_HASH: usize = 0; // PLL0 is used for Hashing
 pub const BM1370_PLL_OUT_HASH: usize = 0; // specifically PLL0_OUT0 is used for Hashing
 pub const BM1370_PLL_ID_UART: usize = 3; // PLL3 can be used for UART Baudrate
 pub const BM1370_PLL_OUT_UART: usize = 4; // specifically PLL3_OUT4 can be used for UART Baudrate
+/// Default `AnalogMuxControlV2::diode_vdd_mux_sel` written at the end of [`Asic::init_next`].
+///
+/// 3 is the value seen in the stock S21XP init sequence. ESP-Miner ends its BM1370
+/// init with 2 instead (reportedly routes the temperature diode, and works on the
+/// AA/PA/BC silicon revisions). Use [`BM1370::set_diode_mux_sel`] to choose.
+pub const BM1370_DEFAULT_DIODE_MUX_SEL: u8 = 3;
 
 /// # BM1370
 #[derive(Debug)]
@@ -38,6 +44,7 @@ pub struct BM1370 {
     pub registers: FnvIndexMap<u8, u32, 64>,
     pub core_registers: FnvIndexMap<u8, u8, 16>,
     cno_interval: usize,
+    diode_mux_sel: u8,
 }
 
 impl BM1370 {
@@ -60,6 +67,39 @@ impl BM1370 {
     /// ```
     pub fn set_chip_addr(&mut self, chip_addr: u8) {
         self.chip_addr = chip_addr;
+    }
+
+    /// ## Select the Analog Mux (diode/VDD) value written by the Init sequence
+    ///
+    /// Sets the `AnalogMuxControlV2::diode_vdd_mux_sel` value that [`Asic::init_next`]
+    /// writes as its last step. Defaults to [`BM1370_DEFAULT_DIODE_MUX_SEL`] (3).
+    /// The choice survives [`Asic::reset`]. Only the low 4 bits are used.
+    ///
+    /// ### Example
+    /// ```
+    /// use bm1370::BM1370;
+    /// use bm13xx_asic::{register::AnalogMuxControlV2, Asic};
+    ///
+    /// let mut bm1370 = BM1370::default();
+    /// assert_eq!(bm1370.diode_mux_sel(), 3);
+    /// bm1370.set_diode_mux_sel(2);
+    /// bm1370.reset();
+    /// assert_eq!(bm1370.diode_mux_sel(), 2);
+    /// let mut last = None;
+    /// while let Some(step) = bm1370.init_next(256) {
+    ///     last = Some(step);
+    /// }
+    /// assert_eq!(last.unwrap().cmd, [0x55, 0xaa, 0x51, 0x09, 0x00, 0x54, 0x00, 0x00, 0x00, 0x02, 0x18]);
+    /// assert_eq!(bm1370.registers.get(&AnalogMuxControlV2::ADDR).unwrap(), &0x0000_0002);
+    /// ```
+    pub fn set_diode_mux_sel(&mut self, mux_sel: u8) -> &mut Self {
+        self.diode_mux_sel = mux_sel & 0xf;
+        self
+    }
+
+    /// ## Get the Analog Mux (diode/VDD) value written by the Init sequence
+    pub const fn diode_mux_sel(&self) -> u8 {
+        self.diode_mux_sel
     }
 
     pub fn set_hash_freq(&mut self, freq: HertzU64) -> &mut Self {
@@ -132,6 +172,7 @@ impl Default for BM1370 {
             registers: FnvIndexMap::<_, _, 64>::new(),
             core_registers: FnvIndexMap::<_, _, 16>::new(),
             cno_interval: 0,
+            diode_mux_sel: BM1370_DEFAULT_DIODE_MUX_SEL,
         };
         bm1370.reset();
         bm1370
@@ -499,8 +540,9 @@ impl Asic for BM1370 {
                         let ana_mux_ctrl = AnalogMuxControlV2(
                             *self.registers.get(&AnalogMuxControlV2::ADDR).unwrap(),
                         )
-                        .set_diode_vdd_mux_sel(3) // Set 2 as it works on most of the versions of
-                        // BM1370 (AA, PA, BC)
+                        // Default 3 (stock S21XP). ESP-Miner uses 2 (reportedly the temp
+                        // diode, works on AA/PA/BC revisions): see `set_diode_mux_sel`.
+                        .set_diode_vdd_mux_sel(self.diode_mux_sel)
                         .val();
                         self.registers
                             .insert(AnalogMuxControlV2::ADDR, ana_mux_ctrl)
