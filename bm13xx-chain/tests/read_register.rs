@@ -1,7 +1,7 @@
 mod common;
 
 use bm1370::{BM1370, BM1370_CHIP_ID, BM1370_CORE_SMALL_CORE_CNT};
-use bm13xx_asic::register::{NonceErrorCounter, TotalHashCounter};
+use bm13xx_asic::register::{NonceErrorCounter, NonceOverflowCounter};
 use bm13xx_protocol::{command::Destination, response::ResponseType};
 use common::{enumerate, nonce_frame, reg_frame};
 
@@ -11,13 +11,13 @@ const SC: usize = BM1370_CORE_SMALL_CORE_CNT;
 async fn send_read_register_only_writes_the_command() {
     let (mut chain, uart, delay) = enumerate(BM1370::default(), BM1370_CHIP_ID, 2).await;
     chain
-        .send_read_register(TotalHashCounter::ADDR, Destination::Chip(0x80))
+        .send_read_register(NonceOverflowCounter::ADDR, Destination::Chip(0x80))
         .await
         .unwrap();
     // 55 AA 42 05 <chip> <reg> <crc5>
     let tx = uart.take_tx();
     assert_eq!(tx.len(), 7);
-    assert_eq!(&tx[..6], &[0x55, 0xAA, 0x42, 0x05, 0x80, 0x8C]);
+    assert_eq!(&tx[..6], &[0x55, 0xAA, 0x42, 0x05, 0x80, 0x50]);
     assert!(delay.0.borrow().is_empty(), "must not wait");
     // nothing received yet: poll returns None instead of blocking
     assert_eq!(chain.poll_response().await.unwrap(), None);
@@ -57,12 +57,30 @@ async fn reply_is_polled_in_order_with_nonces() {
 async fn blocking_read_register_still_works() {
     let (mut chain, uart, _) = enumerate(BM1370::default(), BM1370_CHIP_ID, 2).await;
     uart.push_rx(&nonce_frame(0x1234_5678, 0, 0x21, SC));
-    uart.push_rx(&reg_frame(0x80, TotalHashCounter::ADDR, 0xdead_beef, SC));
+    uart.push_rx(&reg_frame(
+        0x80,
+        NonceOverflowCounter::ADDR,
+        0xdead_beef,
+        SC,
+    ));
     let v = chain
-        .read_register(TotalHashCounter::ADDR, Destination::Chip(0x80))
+        .read_register(NonceOverflowCounter::ADDR, Destination::Chip(0x80))
         .await
         .unwrap();
     assert_eq!(v, 0xdead_beef);
     // (the interleaved nonce was consumed by read_register)
     assert_eq!(chain.poll_response().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn read_register_filters_on_chip_and_times_out() {
+    let (mut chain, uart, _) = enumerate(BM1370::default(), BM1370_CHIP_ID, 2).await;
+    // answer from another chip / another register: not ours
+    uart.push_rx(&reg_frame(0x00, NonceErrorCounter::ADDR, 1, SC));
+    uart.push_rx(&reg_frame(0x80, NonceOverflowCounter::ADDR, 2, SC));
+    let err = chain
+        .read_register(NonceErrorCounter::ADDR, Destination::Chip(0x80))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, bm13xx_chain::Error::ReadTimeout), "{err:?}");
 }

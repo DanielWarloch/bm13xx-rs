@@ -23,8 +23,9 @@ pub const BM1370_PLL_OUT_UART: usize = 4; // specifically PLL3_OUT4 can be used 
 /// Default `AnalogMuxControlV2::diode_vdd_mux_sel` written at the end of [`Asic::init_next`].
 ///
 /// 3 is the value seen in the stock S21XP init sequence. ESP-Miner ends its BM1370
-/// init with 2 instead (reportedly routes the temperature diode, and works on the
-/// AA/PA/BC silicon revisions). Use [`BM1370::set_diode_mux_sel`] to choose.
+/// init with 2 instead (reportedly routes the temperature diode); 2 is also said to
+/// work on the AA, PA and BC silicon revisions. Use [`BM1370::set_diode_mux_sel`]
+/// to choose.
 pub const BM1370_DEFAULT_DIODE_MUX_SEL: u8 = 3;
 
 // `SequenceStep::HashFreq` sub-steps.
@@ -549,8 +550,7 @@ impl Asic for BM1370 {
                         let ana_mux_ctrl = AnalogMuxControlV2(
                             *self.registers.get(&AnalogMuxControlV2::ADDR).unwrap(),
                         )
-                        // Default 3 (stock S21XP). ESP-Miner uses 2 (reportedly the temp
-                        // diode, works on AA/PA/BC revisions): see `set_diode_mux_sel`.
+                        // 3 by default (stock S21XP), see `set_diode_mux_sel`.
                         .set_diode_vdd_mux_sel(self.diode_mux_sel)
                         .val();
                         self.registers
@@ -1414,8 +1414,9 @@ impl Asic for BM1370 {
 mod tests {
     use super::*;
 
-    /// The pre-fix `set_hash_freq_next` (bm1370pm 02f1268), capped at `cap` steps.
-    fn old_set_hash_freq_seq(
+    /// Reference ramp: 6.25 MHz steps up, the target written last, done once the PLL
+    /// is exactly at the target (never done if it cannot get there), capped at `cap`.
+    fn reference_set_hash_freq_seq(
         chip: &mut BM1370,
         target: HertzU64,
         cap: usize,
@@ -1459,7 +1460,33 @@ mod tests {
     }
 
     #[test]
-    fn set_hash_freq_next_matches_old_behaviour_and_always_terminates() {
+    fn set_hash_freq_next_sends_the_last_step() {
+        let mut chip = BM1370::default(); // 50 MHz
+        let seq = new_set_hash_freq_seq(&mut chip, HertzU64::MHz(70));
+        // divider + 56.25, 62.5, 68.75, then 70 (as close as the PLL gets)
+        assert_eq!(seq.len(), 1 + 4);
+        assert!(chip.hash_freq().raw().abs_diff(70_000_000) < 1_000_000);
+        let last = seq.last().unwrap();
+        assert_eq!(last.cmd[5], PLL0Parameter::ADDR);
+        assert_eq!(
+            u32::from_be_bytes(last.cmd[6..10].try_into().unwrap()),
+            chip.plls[BM1370_PLL_ID_HASH].parameter()
+        );
+    }
+
+    #[test]
+    fn set_hash_freq_next_sends_a_decrease() {
+        let mut chip = BM1370::default();
+        new_set_hash_freq_seq(&mut chip, HertzU64::MHz(200));
+        let seq = new_set_hash_freq_seq(&mut chip, HertzU64::MHz(100));
+        // divider, then a single write of the lower target
+        assert_eq!(seq.len(), 2);
+        assert_eq!(seq[1].cmd[5], PLL0Parameter::ADDR);
+        assert_eq!(chip.hash_freq(), HertzU64::MHz(100));
+    }
+
+    #[test]
+    fn set_hash_freq_next_matches_reference_and_always_terminates() {
         let (mut matched, mut inexact) = (0, 0);
         for start in [50u32, 400, 600] {
             let targets = (50..=1000).step_by(5).map(HertzU64::MHz).chain([
@@ -1468,19 +1495,19 @@ mod tests {
                 HertzU64::kHz(433_333),
             ]);
             for target in targets {
-                let mut old = BM1370::default();
+                let mut reference = BM1370::default();
                 let mut new = BM1370::default();
-                new_set_hash_freq_seq(&mut old, HertzU64::MHz(start.into()));
+                new_set_hash_freq_seq(&mut reference, HertzU64::MHz(start.into()));
                 new_set_hash_freq_seq(&mut new, HertzU64::MHz(start.into()));
                 let got = new_set_hash_freq_seq(&mut new, target);
-                match old_set_hash_freq_seq(&mut old, target, 400) {
-                    // the old loop ended: byte-identical sequence
+                match reference_set_hash_freq_seq(&mut reference, target, 400) {
+                    // the reference ended: byte-identical sequence
                     Some(expected) => {
                         matched += 1;
                         assert_eq!(got, expected, "{start} MHz -> {target}");
                     }
-                    // the old loop never ended (target or a step not reachable by the
-                    // PLL search): the new one ends, between start and target
+                    // the reference never ends (target or a step not reachable by the
+                    // PLL search): set_hash_freq_next does, between start and target
                     None => {
                         inexact += 1;
                         let f = new.hash_freq().raw();
@@ -1503,7 +1530,7 @@ mod tests {
         assert!(matched > 150, "{matched} sequences compared");
         assert!(
             inexact > 0,
-            "expected some targets the old loop could not reach"
+            "expected some targets the reference could not reach"
         );
     }
 
