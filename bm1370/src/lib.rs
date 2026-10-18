@@ -1114,7 +1114,12 @@ impl Asic for BM1370 {
     ) -> Option<(CmdDelay, CmdDelay)> {
         let mut pll = self.plls[BM1370_PLL_ID_HASH];
         pll.set_out_div(BM1370_PLL_OUT_HASH, 0);
-        pll.set_frequency(self.input_clock_freq, BM1370_PLL_OUT_HASH, target_freq, false);
+        pll.set_frequency(
+            self.input_clock_freq,
+            BM1370_PLL_OUT_HASH,
+            target_freq,
+            false,
+        );
         let divider = CmdDelay {
             cmd: Command::write_reg(PLL0Divider::ADDR, pll.divider(), dest),
             delay_ms: 2,
@@ -1122,7 +1127,11 @@ impl Asic for BM1370 {
         let parameter = CmdDelay {
             // Conservative PLL relock settle delay, matching the broadcast ramp.
             cmd: Command::write_reg(PLL0Parameter::ADDR, pll.parameter(), dest),
-            delay_ms: if target_freq > HertzU64::MHz(550) { 2700 } else { 400 },
+            delay_ms: if target_freq > HertzU64::MHz(550) {
+                2700
+            } else {
+                400
+            },
         };
         Some((divider, parameter))
     }
@@ -1190,8 +1199,8 @@ impl Asic for BM1370 {
     /// use bm13xx_asic::{Asic, CmdDelay};
     ///
     /// let mut bm1370 = BM1370::default();
-    // assert_eq!(bm1370.set_version_rolling_next(0x1fff_e000), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x10, 0x00, 0x00, 0x1a, 0x44, 0x17], delay_ms: 1})); // S21XP
-    /// assert_eq!(bm1370.set_version_rolling_next(0x1fff_e000), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x10, 0x00, 0x00, 0x1e, 0xb5, 0x0f], delay_ms: 1})); // S21Pro
+    /// assert_eq!(bm1370.set_version_rolling_next(0x1fff_e000), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x10, 0x00, 0x00, 0x1a, 0x44, 0x17], delay_ms: 1})); // S21XP
+    // assert_eq!(bm1370.set_version_rolling_next(0x1fff_e000), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x10, 0x00, 0x00, 0x1e, 0xb5, 0x0f], delay_ms: 1})); // S21Pro
     /// assert_eq!(bm1370.set_version_rolling_next(0x1fff_e000), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0xa4, 0x90, 0x00, 0xff, 0xff, 0x1c], delay_ms: 1}));
     /// assert_eq!(bm1370.set_version_rolling_next(0x1fff_e000), None);
     /// ```
