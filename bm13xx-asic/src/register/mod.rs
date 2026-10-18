@@ -37,6 +37,7 @@ mod error_flag;
 mod external_temperature_sensor;
 mod fast_uart;
 mod frequency_sweep;
+mod hash_counter;
 mod hash_counting_number;
 mod hash_rate;
 mod i2c;
@@ -59,14 +60,19 @@ pub use analog_mux::{AnalogMuxControl, AnalogMuxControlV2};
 pub use chip_identification::ChipIdentification;
 pub use chip_nonce_offset::{ChipNonceOffset, ChipNonceOffsetV2};
 pub use clock_order::{
-    ClockOrderControl0, ClockOrderControl1, ClockOrderStatus, ClockSelect, OrderedClockEnable,
-    OrderedClockMonitor,
+    ClockOrderControl0, ClockOrderControl1, ClockSelect, OrderedClockEnable, OrderedClockMonitor,
 };
 pub use core_register::{CoreRegisterControl, CoreRegisterValue};
 pub use error_flag::ErrorFlag;
 pub use external_temperature_sensor::ExternalTemperatureSensorRead;
 pub use fast_uart::{BaudrateClockSelectV2, FastUARTConfiguration, FastUARTConfigurationV2};
 pub use frequency_sweep::{FrequencySweepControl1, GoldenNonceForSweepReturn};
+#[allow(deprecated)]
+pub use hash_counter::ClockOrderStatus;
+pub use hash_counter::{
+    DomainHashCounter0, DomainHashCounter1, DomainHashCounter2, DomainHashCounter3,
+    TotalHashCounter, DOMAIN_HASH_COUNTER_ADDRS, HASHES_PER_COUNT,
+};
 pub use hash_counting_number::HashCountingNumber;
 pub use hash_rate::HashRate;
 pub use i2c::I2CControl;

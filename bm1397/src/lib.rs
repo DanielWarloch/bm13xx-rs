@@ -251,7 +251,7 @@ impl Asic for BM1397 {
             .insert(ClockOrderControl1::ADDR, 0xFB73_EA62)
             .unwrap();
         self.registers
-            .insert(ClockOrderStatus::ADDR, 0x0000_0000)
+            .insert(TotalHashCounter::ADDR, 0x0000_0000)
             .unwrap();
         self.registers
             .insert(FrequencySweepControl1::ADDR, 0x0000_0070)
