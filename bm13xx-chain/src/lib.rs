@@ -75,7 +75,7 @@ pub use self::error::{Error, Result};
 
 use bm13xx_asic::{
     register::{ChipIdentification, Register, TicketMask},
-    Asic, CmdDelay,
+    Asic, CmdDelay, FreqRamp,
 };
 use bm13xx_protocol::{
     command::{Command, Destination},
@@ -410,6 +410,64 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
         }
         self.delay.delay_ms(100).await;
         Ok(())
+    }
+
+    /// ## Set the SHA Hashing Frequency with a ramp, in both directions
+    ///
+    /// Moves the whole chain to `freq` in steps of at most `ramp.step`, waiting
+    /// `ramp.step_delay_ms` after each, for increases **and** decreases (see
+    /// [`Asic::set_hash_freq_ramp_next`]). [`Chain::set_hash_freq`] is unchanged.
+    /// ASICs without ramp support fall back to their [`Chain::set_hash_freq`] sequence.
+    pub async fn set_hash_freq_ramped(
+        &mut self,
+        freq: HertzU64,
+        ramp: FreqRamp,
+    ) -> Result<(), U::Error, OB::Error, OR::Error> {
+        while let Some(step) = self.asic.set_hash_freq_ramp_next(freq, ramp) {
+            self.send(step).await?;
+        }
+        self.delay.delay_ms(100).await;
+        Ok(())
+    }
+
+    /// ## Set the Hash Frequency of a single chip with a ramp, in both directions
+    ///
+    /// Like [`Chain::set_hash_freq_chip`], but moves the chip from `from` (its
+    /// current frequency, which the caller tracks: the chain does not keep
+    /// per-chip state) to `to` in steps of at most `ramp.step`, waiting
+    /// `ramp.step_delay_ms` after each. The PLL divider is written once, before
+    /// the first step; steps that would not change the PLL parameter are skipped.
+    /// Does nothing (returns `Ok`) on ASICs that do not support per-chip frequency.
+    pub async fn set_hash_freq_chip_ramped(
+        &mut self,
+        chip_addr: u8,
+        from: HertzU64,
+        to: HertzU64,
+        ramp: FreqRamp,
+    ) -> Result<(), U::Error, OB::Error, OR::Error> {
+        let dest = Destination::Chip(chip_addr);
+        let mut freq = from;
+        let mut divider_sent = false;
+        let mut last_cmd = None;
+        loop {
+            freq = ramp.next_freq(freq, to);
+            let Some((divider, mut parameter)) = self.asic.set_hash_freq_chip_cmd(dest, freq)
+            else {
+                return Ok(());
+            };
+            if !divider_sent {
+                self.send(divider).await?;
+                divider_sent = true;
+            }
+            if last_cmd != Some(parameter.cmd) {
+                last_cmd = Some(parameter.cmd);
+                parameter.delay_ms = ramp.step_delay_ms;
+                self.send(parameter).await?;
+            }
+            if freq == to {
+                return Ok(());
+            }
+        }
     }
 
     /// ## Set the Ticket Mask (share difficulty) on the whole chain
