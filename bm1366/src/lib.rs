@@ -1080,6 +1080,11 @@ impl Asic for BM1366 {
 
     /// ## Send Hash Frequency command list
     ///
+    /// Ramps up from the current frequency in 6.25 MHz steps; a decrease is a
+    /// single write of the target. The sequence ends after the target
+    /// has been written, even when the PLL can only approximate it, and skips
+    /// intermediate steps the PLL cannot reach.
+    ///
     /// ### Example
     /// ```
     /// use bm1366::{BM1366, BM1366_PLL_ID_HASH};
@@ -1099,23 +1104,47 @@ impl Asic for BM1366 {
     /// ```
     fn set_hash_freq_next(&mut self, target_freq: HertzU64) -> Option<CmdDelay> {
         match self.seq_step {
+            // the write of the target itself has been sent
+            SequenceStep::HashFreq(1) => {
+                self.seq_step = SequenceStep::None;
+                None
+            }
             SequenceStep::HashFreq(_) => {
-                let freq = self.hash_freq() + HertzU64::kHz(6250);
-                self.set_hash_freq(if freq > target_freq {
-                    target_freq
-                } else {
-                    freq
-                });
+                let current = self.hash_freq();
+                let current_param = self.plls[BM1366_PLL_ID_HASH].parameter();
+                let mut freq = current + HertzU64::kHz(6250);
+                let next = loop {
+                    let next = if freq > target_freq {
+                        target_freq
+                    } else {
+                        freq
+                    };
+                    self.set_hash_freq(next);
+                    if current == target_freq
+                        || next == target_freq
+                        || self.plls[BM1366_PLL_ID_HASH].parameter() != current_param
+                    {
+                        break next;
+                    }
+                    // The PLL cannot reach this intermediate step (it would stay
+                    // here forever): skip to the next one.
+                    freq += HertzU64::kHz(6250);
+                };
                 self.registers
                     .insert(
                         PLL0Parameter::ADDR,
                         self.plls[BM1366_PLL_ID_HASH].parameter(),
                     )
                     .unwrap();
-                if freq == target_freq + HertzU64::kHz(6250) {
+                if current == target_freq {
                     self.seq_step = SequenceStep::None;
                     None
                 } else {
+                    if next == target_freq {
+                        // Stop after this write even if the PLL can only approximate
+                        // the target (it would otherwise be re-written forever).
+                        self.seq_step = SequenceStep::HashFreq(1);
+                    }
                     Some(CmdDelay {
                         cmd: Command::write_reg(
                             PLL0Parameter::ADDR,
@@ -1211,5 +1240,103 @@ impl Asic for BM1366 {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-fix `set_hash_freq_next` (bm1370pm 02f1268), capped at `cap` steps.
+    fn old_set_hash_freq_seq(
+        chip: &mut BM1366,
+        target: HertzU64,
+        cap: usize,
+    ) -> Option<heapless::Vec<CmdDelay, 512>> {
+        let mut out = heapless::Vec::new();
+        chip.plls[BM1366_PLL_ID_HASH].set_out_div(BM1366_PLL_OUT_HASH, 0);
+        out.push(CmdDelay {
+            cmd: Command::write_reg(
+                PLL0Divider::ADDR,
+                chip.plls[BM1366_PLL_ID_HASH].divider(),
+                Destination::All,
+            ),
+            delay_ms: 2,
+        })
+        .unwrap();
+        for _ in 0..cap {
+            let freq = chip.hash_freq() + HertzU64::kHz(6250);
+            chip.set_hash_freq(if freq > target { target } else { freq });
+            if freq == target + HertzU64::kHz(6250) {
+                return Some(out);
+            }
+            out.push(CmdDelay {
+                cmd: Command::write_reg(
+                    PLL0Parameter::ADDR,
+                    chip.plls[BM1366_PLL_ID_HASH].parameter(),
+                    Destination::All,
+                ),
+                delay_ms: if freq > HertzU64::MHz(380) { 2300 } else { 400 },
+            })
+            .unwrap();
+        }
+        None
+    }
+
+    fn new_set_hash_freq_seq(chip: &mut BM1366, target: HertzU64) -> heapless::Vec<CmdDelay, 512> {
+        let mut out = heapless::Vec::new();
+        while let Some(step) = chip.set_hash_freq_next(target) {
+            out.push(step).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn set_hash_freq_next_matches_old_behaviour_and_always_terminates() {
+        let (mut matched, mut inexact) = (0, 0);
+        for start in [50u32, 400, 600] {
+            let targets = (50..=1000).step_by(5).map(HertzU64::MHz).chain([
+                HertzU64::MHz(640),
+                HertzU64::kHz(512_500),
+                HertzU64::kHz(433_333),
+            ]);
+            for target in targets {
+                let mut old = BM1366::default();
+                let mut new = BM1366::default();
+                new_set_hash_freq_seq(&mut old, HertzU64::MHz(start.into()));
+                new_set_hash_freq_seq(&mut new, HertzU64::MHz(start.into()));
+                let got = new_set_hash_freq_seq(&mut new, target);
+                match old_set_hash_freq_seq(&mut old, target, 400) {
+                    // the old loop ended: byte-identical sequence
+                    Some(expected) => {
+                        matched += 1;
+                        assert_eq!(got, expected, "{start} MHz -> {target}");
+                    }
+                    // the old loop never ended (target or a step not reachable by the
+                    // PLL search): the new one ends, between start and target
+                    None => {
+                        inexact += 1;
+                        let f = new.hash_freq().raw();
+                        let (lo, hi) = (
+                            u64::from(start).min(target.to_MHz()) * 1_000_000,
+                            u64::from(start).max(target.to_MHz() + 1) * 1_000_000,
+                        );
+                        assert!(
+                            lo <= f + 1_000_000 && f <= hi,
+                            "{start} MHz -> {target}: {f}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    new.set_hash_freq_next(target).map(|c| c.cmd[5]),
+                    Some(PLL0Divider::ADDR)
+                );
+            }
+        }
+        assert!(matched > 150, "{matched} sequences compared");
+        assert!(
+            inexact > 0,
+            "expected some targets the old loop could not reach"
+        );
     }
 }
