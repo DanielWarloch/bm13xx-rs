@@ -94,6 +94,28 @@ pub trait Baud {
 
 const RX_BUF_SIZE: usize = 256;
 
+/// Hex dump of a frame that formats the same with the `log` and `defmt` features.
+struct HexFrame<'a>(&'a [u8]);
+
+impl core::fmt::Display for HexFrame<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, b) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for HexFrame<'_> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{=[u8]:02x}", self.0);
+    }
+}
+
 const NONCE_BITS: u32 = u32::BITS;
 const CHIP_ADDR_BITS: u32 = u8::BITS;
 
@@ -190,8 +212,10 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                 }
                 Err(bm13xx_protocol::Error::InvalidCrc { expected, actual }) => {
                     error!(
-                        "Ignoring Frame {:x?} with bad CRC: {:02x}!={:02x}",
-                        frame, expected, actual
+                        "Ignoring Frame {} with bad CRC: {:02x}!={:02x}",
+                        HexFrame(frame),
+                        expected,
+                        actual
                     );
                     expected_frame_size
                 }
@@ -201,15 +225,16 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
                         .position(|w| w == [0xAA, 0x55])
                         .unwrap_or(expected_frame_size);
                     error!(
-                        "Resync Frame {:x?} because bad preamble, dropping first {} bytes",
-                        frame, offset
+                        "Resync Frame {} because bad preamble, dropping first {} bytes",
+                        HexFrame(frame),
+                        offset
                     );
                     offset
                 }
                 Err(bm13xx_protocol::Error::UnsupportedCoreSmallCoreCnt) => {
                     error!(
-                        "Ignoring Frame {:x?} because bad CoreSmallCoreCnt {}",
-                        frame,
+                        "Ignoring Frame {} because bad CoreSmallCoreCnt {}",
+                        HexFrame(frame),
                         self.asic.core_small_core_count()
                     );
                     expected_frame_size
