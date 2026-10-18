@@ -520,7 +520,9 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
     /// from blocking forever if no chip answers (e.g. a wrong address) — it returns
     /// [`Error::ReadTimeout`] after the budget. With [`Destination::All`] on a
     /// multi-chip chain, the first chip to answer wins. Non-matching frames (e.g.
-    /// interleaved nonces) are skipped.
+    /// interleaved nonces) are consumed and **discarded**: while mining, prefer
+    /// [`Chain::send_read_register`] and handle the reply in the
+    /// [`Chain::poll_response`] loop.
     pub async fn read_register(
         &mut self,
         reg_addr: u8,
@@ -541,6 +543,23 @@ impl<A: Asic, U: Read + ReadReady + Write + Baud, OB: OutputPin, OR: OutputPin, 
             self.delay.delay_ms(2).await;
         }
         Err(Error::ReadTimeout)
+    }
+
+    /// ## Send a Read Register command without waiting for the reply
+    ///
+    /// Only writes the Read Register command (to all chips or one, per `dest`) and
+    /// returns. The reply(ies) arrive as [`ResponseType::Reg`] from
+    /// [`Chain::poll_response`], in order with the nonce responses, so nothing is
+    /// lost while mining (unlike [`Chain::read_register`], which drops the nonces
+    /// it sees while waiting). Match replies on `chip_addr` and `reg_addr`; with
+    /// [`Destination::All`] every chip answers.
+    pub async fn send_read_register(
+        &mut self,
+        reg_addr: u8,
+        dest: Destination,
+    ) -> Result<(), U::Error, OB::Error, OR::Error> {
+        let cmd = Command::read_reg(reg_addr, dest);
+        self.uart.write_all(&cmd).await.map_err(Error::Io)
     }
 
     /// ## Split some Nonce space between chips
