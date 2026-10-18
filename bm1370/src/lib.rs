@@ -28,12 +28,6 @@ pub const BM1370_PLL_OUT_UART: usize = 4; // specifically PLL3_OUT4 can be used 
 /// to choose.
 pub const BM1370_DEFAULT_DIODE_MUX_SEL: u8 = 3;
 
-// `SequenceStep::HashFreq` sub-steps.
-const HASH_FREQ_START: usize = 0; // divider written
-const HASH_FREQ_LAST_SENT: usize = 1; // target written (set_hash_freq_next)
-const HASH_FREQ_RAMP: usize = 0x10; // ramp in progress (set_hash_freq_ramp_next)
-const HASH_FREQ_RAMP_LAST_SENT: usize = 0x11; // target written (set_hash_freq_ramp_next)
-
 /// # BM1370
 #[derive(Debug)]
 // #[cfg_attr(feature = "defmt", derive(defmt::Format))] // FnvIndexMap doesn't implement defmt
@@ -47,13 +41,13 @@ pub struct BM1370 {
     >,
     pub input_clock_freq: HertzU64,
     pub plls: [bm13xx_asic::pll::Pll; BM1370_PLL_CNT],
+    /// Nominal frequency of the last step of an ongoing [`Asic::set_hash_freq_ramp_next`].
+    ramp_freq: HertzU64,
     pub chip_addr: u8,
     pub registers: FnvIndexMap<u8, u32, 64>,
     pub core_registers: FnvIndexMap<u8, u8, 16>,
     cno_interval: usize,
     diode_mux_sel: u8,
-    /// Nominal frequency of the last step of an ongoing [`Asic::set_hash_freq_ramp_next`].
-    ramp_freq: HertzU64,
 }
 
 impl BM1370 {
@@ -177,17 +171,23 @@ impl Default for BM1370 {
             sha: bm13xx_asic::sha::Sha::default(),
             input_clock_freq: HertzU64::MHz(25),
             plls: [bm13xx_asic::pll::Pll::default(); BM1370_PLL_CNT],
+            ramp_freq: HertzU64::Hz(0),
             chip_addr: 0,
             registers: FnvIndexMap::<_, _, 64>::new(),
             core_registers: FnvIndexMap::<_, _, 16>::new(),
             cno_interval: 0,
             diode_mux_sel: BM1370_DEFAULT_DIODE_MUX_SEL,
-            ramp_freq: HertzU64::Hz(0),
         };
         bm1370.reset();
         bm1370
     }
 }
+
+// `SequenceStep::HashFreq` sub-steps.
+const HASH_FREQ_START: usize = 0; // divider written
+const HASH_FREQ_LAST_SENT: usize = 1; // target written (set_hash_freq_next)
+const HASH_FREQ_RAMP: usize = 0x10; // ramp in progress (set_hash_freq_ramp_next)
+const HASH_FREQ_RAMP_LAST_SENT: usize = 0x11; // target written (set_hash_freq_ramp_next)
 
 impl Asic for BM1370 {
     /// ## Reset the Chip to default state
@@ -1068,11 +1068,95 @@ impl Asic for BM1370 {
         }
     }
 
+    /// ## Send Ramped Hash Frequency command list (both directions)
+    ///
+    /// First writes `PLL0Divider` (out divider 0, like [`Asic::set_hash_freq_next`]),
+    /// then one `PLL0Parameter` write per `ramp.step` towards `target_freq`, each
+    /// followed by `ramp.step_delay_ms`. Works for increases and decreases, always
+    /// terminates (steps are tracked on nominal frequencies, so a target the PLL can
+    /// only approximate is fine), and skips steps whose PLL parameter would not change.
+    ///
+    /// ### Example
+    /// ```
+    /// use bm1370::{BM1370, BM1370_PLL_ID_HASH};
+    /// use bm13xx_asic::{Asic, CmdDelay, FreqRamp};
+    /// use fugit::HertzU64;
+    ///
+    /// let ramp = FreqRamp::new(HertzU64::kHz(6250), 100);
+    /// let mut bm1370 = BM1370::default(); // PLL0 @ 50 MHz
+    /// // Up: same PLL parameters as `set_hash_freq_next`, but with the ramp delay
+    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x70, 0x00, 0x00, 0x00, 0x00, 24], delay_ms: 2}));
+    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xb4, 0x02, 0x74, 29], delay_ms: 100}));
+    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xaf, 0x02, 0x64, 0x0d], delay_ms: 100}));
+    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xb0, 0x02, 0x73, 9], delay_ms: 100}));
+    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xa8, 0x02, 0x63, 0x14], delay_ms: 100}));
+    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), None);
+    /// assert_eq!(bm1370.hash_freq(), HertzU64::MHz(75));
+    /// // Down: 75 -> 50 MHz in 4 steps instead of a single jump
+    /// let mut writes = 0;
+    /// while let Some(step) = bm1370.set_hash_freq_ramp_next(HertzU64::MHz(50), ramp) {
+    ///     assert!(step.delay_ms == 2 || step.delay_ms == 100);
+    ///     writes += 1;
+    /// }
+    /// assert_eq!(writes, 1 + 4); // divider + 68.75, 62.5, 56.25, 50
+    /// assert_eq!(bm1370.hash_freq(), HertzU64::MHz(50));
+    /// ```
+    fn set_hash_freq_ramp_next(
+        &mut self,
+        target_freq: HertzU64,
+        ramp: FreqRamp,
+    ) -> Option<CmdDelay> {
+        match self.seq_step {
+            SequenceStep::HashFreq(HASH_FREQ_RAMP) => loop {
+                let prev_param = self.plls[BM1370_PLL_ID_HASH].parameter();
+                self.ramp_freq = ramp.next_freq(self.ramp_freq, target_freq);
+                self.set_hash_freq(self.ramp_freq);
+                let param = self.plls[BM1370_PLL_ID_HASH].parameter();
+                let last = self.ramp_freq == target_freq;
+                if last {
+                    self.seq_step = SequenceStep::HashFreq(HASH_FREQ_RAMP_LAST_SENT);
+                }
+                if param != prev_param {
+                    self.registers.insert(PLL0Parameter::ADDR, param).unwrap();
+                    break Some(CmdDelay {
+                        cmd: Command::write_reg(PLL0Parameter::ADDR, param, Destination::All),
+                        delay_ms: ramp.step_delay_ms,
+                    });
+                }
+                if last {
+                    self.seq_step = SequenceStep::None;
+                    break None;
+                }
+            },
+            SequenceStep::HashFreq(HASH_FREQ_RAMP_LAST_SENT) => {
+                self.seq_step = SequenceStep::None;
+                None
+            }
+            _ => {
+                // authorize a ramp start whatever the current step was
+                self.seq_step = SequenceStep::HashFreq(HASH_FREQ_RAMP);
+                self.ramp_freq = self.hash_freq();
+                self.plls[BM1370_PLL_ID_HASH].set_out_div(BM1370_PLL_OUT_HASH, 0);
+                self.registers
+                    .insert(PLL0Divider::ADDR, self.plls[BM1370_PLL_ID_HASH].divider())
+                    .unwrap();
+                Some(CmdDelay {
+                    cmd: Command::write_reg(
+                        PLL0Divider::ADDR,
+                        self.plls[BM1370_PLL_ID_HASH].divider(),
+                        Destination::All,
+                    ),
+                    delay_ms: 2,
+                })
+            }
+        }
+    }
+
     /// ## Send Hash Frequency command list
     ///
     /// Ramps up from the current frequency in 6.25 MHz steps; a decrease is a
-    /// single write of the target.
-    /// Use [`Asic::set_hash_freq_ramp_next`] to ramp down too. The sequence ends after the target
+    /// single write of the target. Use [`Asic::set_hash_freq_ramp_next`] to ramp
+    /// down too. The sequence ends after the target
     /// has been written, even when the PLL can only approximate it, and skips
     /// intermediate steps the PLL cannot reach.
     ///
@@ -1149,90 +1233,6 @@ impl Asic for BM1370 {
             _ => {
                 // authorize a SetHashFreq sequence start whatever the current step was
                 self.seq_step = SequenceStep::HashFreq(HASH_FREQ_START);
-                self.plls[BM1370_PLL_ID_HASH].set_out_div(BM1370_PLL_OUT_HASH, 0);
-                self.registers
-                    .insert(PLL0Divider::ADDR, self.plls[BM1370_PLL_ID_HASH].divider())
-                    .unwrap();
-                Some(CmdDelay {
-                    cmd: Command::write_reg(
-                        PLL0Divider::ADDR,
-                        self.plls[BM1370_PLL_ID_HASH].divider(),
-                        Destination::All,
-                    ),
-                    delay_ms: 2,
-                })
-            }
-        }
-    }
-
-    /// ## Send Ramped Hash Frequency command list (both directions)
-    ///
-    /// First writes `PLL0Divider` (out divider 0, like [`Asic::set_hash_freq_next`]),
-    /// then one `PLL0Parameter` write per `ramp.step` towards `target_freq`, each
-    /// followed by `ramp.step_delay_ms`. Works for increases and decreases, always
-    /// terminates (steps are tracked on nominal frequencies, so a target the PLL can
-    /// only approximate is fine), and skips steps whose PLL parameter would not change.
-    ///
-    /// ### Example
-    /// ```
-    /// use bm1370::{BM1370, BM1370_PLL_ID_HASH};
-    /// use bm13xx_asic::{Asic, CmdDelay, FreqRamp};
-    /// use fugit::HertzU64;
-    ///
-    /// let ramp = FreqRamp::new(HertzU64::kHz(6250), 100);
-    /// let mut bm1370 = BM1370::default(); // PLL0 @ 50 MHz
-    /// // Up: same PLL parameters as `set_hash_freq_next`, but with the ramp delay
-    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x70, 0x00, 0x00, 0x00, 0x00, 24], delay_ms: 2}));
-    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xb4, 0x02, 0x74, 29], delay_ms: 100}));
-    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xaf, 0x02, 0x64, 0x0d], delay_ms: 100}));
-    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xb0, 0x02, 0x73, 9], delay_ms: 100}));
-    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), Some(CmdDelay{cmd: [0x55, 0xaa, 0x51, 0x09, 0x00, 0x08, 0xc0, 0xa8, 0x02, 0x63, 0x14], delay_ms: 100}));
-    /// assert_eq!(bm1370.set_hash_freq_ramp_next(HertzU64::MHz(75), ramp), None);
-    /// assert_eq!(bm1370.hash_freq(), HertzU64::MHz(75));
-    /// // Down: 75 -> 50 MHz in 4 steps instead of a single jump
-    /// let mut writes = 0;
-    /// while let Some(step) = bm1370.set_hash_freq_ramp_next(HertzU64::MHz(50), ramp) {
-    ///     assert!(step.delay_ms == 2 || step.delay_ms == 100);
-    ///     writes += 1;
-    /// }
-    /// assert_eq!(writes, 1 + 4); // divider + 68.75, 62.5, 56.25, 50
-    /// assert_eq!(bm1370.hash_freq(), HertzU64::MHz(50));
-    /// ```
-    fn set_hash_freq_ramp_next(
-        &mut self,
-        target_freq: HertzU64,
-        ramp: FreqRamp,
-    ) -> Option<CmdDelay> {
-        match self.seq_step {
-            SequenceStep::HashFreq(HASH_FREQ_RAMP) => loop {
-                let prev_param = self.plls[BM1370_PLL_ID_HASH].parameter();
-                self.ramp_freq = ramp.next_freq(self.ramp_freq, target_freq);
-                self.set_hash_freq(self.ramp_freq);
-                let param = self.plls[BM1370_PLL_ID_HASH].parameter();
-                let last = self.ramp_freq == target_freq;
-                if last {
-                    self.seq_step = SequenceStep::HashFreq(HASH_FREQ_RAMP_LAST_SENT);
-                }
-                if param != prev_param {
-                    self.registers.insert(PLL0Parameter::ADDR, param).unwrap();
-                    break Some(CmdDelay {
-                        cmd: Command::write_reg(PLL0Parameter::ADDR, param, Destination::All),
-                        delay_ms: ramp.step_delay_ms,
-                    });
-                }
-                if last {
-                    self.seq_step = SequenceStep::None;
-                    break None;
-                }
-            },
-            SequenceStep::HashFreq(HASH_FREQ_RAMP_LAST_SENT) => {
-                self.seq_step = SequenceStep::None;
-                None
-            }
-            _ => {
-                // authorize a ramp start whatever the current step was
-                self.seq_step = SequenceStep::HashFreq(HASH_FREQ_RAMP);
-                self.ramp_freq = self.hash_freq();
                 self.plls[BM1370_PLL_ID_HASH].set_out_div(BM1370_PLL_OUT_HASH, 0);
                 self.registers
                     .insert(PLL0Divider::ADDR, self.plls[BM1370_PLL_ID_HASH].divider())
